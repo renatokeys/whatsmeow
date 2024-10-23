@@ -242,11 +242,19 @@ func (cli *Client) decryptMessages(info *types.MessageInfo, node *waBinary.Node)
 		var decrypted []byte
 		var err error
 		if encType == "pkmsg" || encType == "msg" {
+			fmt.Println("Decrypting DM  ->  pkmsg | msg")
 			decrypted, err = cli.decryptDM(&child, info.Sender, encType == "pkmsg")
+			fmt.Println("Decrypted DM decrypted", decrypted)
+			fmt.Println("Decrypted DM error", err)
 			containsDirectMsg = true
 		} else if info.IsGroup && encType == "skmsg" {
+			fmt.Println("Decrypting Group  ->  skmsg")
 			decrypted, err = cli.decryptGroupMsg(&child, info.Sender, info.Chat)
+			fmt.Println("Decrypted Group decrypted", decrypted)
+			fmt.Println("Decrypted Group error", err)
 		} else if encType == "msmsg" && info.Sender.IsBot() {
+			fmt.Println("Decrypting Bot  ->  msmsg")
+
 			// Meta AI / other bots (biz?):
 
 			// step 1: get message secret
@@ -282,12 +290,15 @@ func (cli *Client) decryptMessages(info *types.MessageInfo, node *waBinary.Node)
 
 			// step 4: decrypt and voila
 			decrypted, err = cli.decryptBotMessage(messageSecret, &msMsg, messageID, targetSenderJID, info)
+			fmt.Println("Decrypted Bot decrypted", decrypted)
+			fmt.Println("Decrypted Bot error", err)
 		} else {
 			cli.Log.Warnf("Unhandled encrypted message (type %s) from %s", encType, info.SourceString())
 			continue
 		}
 
 		if err != nil {
+			fmt.Println("Error decrypting message , check message", string(decrypted))
 			cli.Log.Warnf("Error decrypting message from %s: %v", info.SourceString(), err)
 			isUnavailable := encType == "skmsg" && !containsDirectMsg && errors.Is(err, signalerror.ErrNoSenderKeyForUser)
 			go cli.sendRetryReceipt(node, info, isUnavailable)
@@ -361,6 +372,7 @@ func (cli *Client) decryptDM(child *waBinary.Node, from types.JID, isPreKey bool
 		}
 		plaintext, err = cipher.Decrypt(msg)
 		if err != nil {
+			fmt.Println("Error decrypting message check message ->", plaintext)
 			return nil, fmt.Errorf("failed to decrypt normal message: %w", err)
 		}
 	}
