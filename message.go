@@ -229,42 +229,75 @@ func (cli *Client) decryptMessages(info *types.MessageInfo, node *waBinary.Node)
 	children := node.GetChildren()
 	cli.Log.Debugf("Decrypting message from %s", info.SourceString())
 	handled := false
-	//containsDirectMsg := false
-
+	containsDirectMsg := false
 	for _, child := range children {
 		if child.Tag != "enc" {
 			continue
 		}
-
 		ag := child.AttrGetter()
 		encType, ok := ag.GetString("type", false)
 		if !ok {
 			continue
 		}
-
 		var decrypted []byte
 		var err error
-
 		if encType == "pkmsg" || encType == "msg" {
 			decrypted, err = cli.decryptDM(&child, info.Sender, encType == "pkmsg")
+			containsDirectMsg = true
 		} else if info.IsGroup && encType == "skmsg" {
 			decrypted, err = cli.decryptGroupMsg(&child, info.Sender, info.Chat)
+		} else if encType == "msmsg" && info.Sender.IsBot() {
+			// Meta AI / other bots (biz?):
+
+			// step 1: get message secret
+			targetSenderJID := info.MsgMetaInfo.TargetSender
+			if targetSenderJID.User == "" {
+				// if no targetSenderJID in <meta> this must be ourselves (one-one-one mode)
+				targetSenderJID = cli.getOwnID()
+			}
+
+			messageSecret, err := cli.Store.MsgSecrets.GetMessageSecret(info.Chat, targetSenderJID, info.MsgMetaInfo.TargetID)
+			if err != nil || messageSecret == nil {
+				cli.Log.Warnf("Error getting message secret for bot msg with id %s", node.AttrGetter().String("id"))
+				continue
+			}
+
+			// step 2: get MessageSecretMessage
+			byteContents := child.Content.([]byte) // <enc> contents
+			var msMsg waE2E.MessageSecretMessage
+
+			err = proto.Unmarshal(byteContents, &msMsg)
+			if err != nil {
+				cli.Log.Warnf("Error decoding MessageSecretMesage protobuf %v", err)
+				continue
+			}
+
+			// step 3: determine best message id for decryption
+			var messageID string
+			if info.MsgBotInfo.EditType == types.EditTypeInner || info.MsgBotInfo.EditType == types.EditTypeLast {
+				messageID = info.MsgBotInfo.EditTargetID
+			} else {
+				messageID = info.ID
+			}
+
+			// step 4: decrypt and voila
+			decrypted, err = cli.decryptBotMessage(messageSecret, &msMsg, messageID, targetSenderJID, info)
+		} else {
+			cli.Log.Warnf("Unhandled encrypted message (type %s) from %s", encType, info.SourceString())
+			continue
 		}
 
 		if err != nil {
 			cli.Log.Warnf("Error decrypting message from %s: %v", info.SourceString(), err)
-
-			// Force ACK even when decryption fails
-			go cli.sendAck(node) // Force ACK here
-			go cli.sendRetryReceipt(node, info, false)
-
+			isUnavailable := encType == "skmsg" && !containsDirectMsg && errors.Is(err, signalerror.ErrNoSenderKeyForUser)
+			go cli.sendRetryReceipt(node, info, isUnavailable)
 			cli.dispatchEvent(&events.UndecryptableMessage{
 				Info:            *info,
+				IsUnavailable:   isUnavailable,
 				DecryptFailMode: events.DecryptFailMode(ag.OptionalString("decrypt-fail")),
 			})
 			return
 		}
-
 		retryCount := ag.OptionalInt("count")
 		cli.cancelDelayedRequestFromPhone(info.ID)
 
@@ -284,7 +317,6 @@ func (cli *Client) decryptMessages(info *types.MessageInfo, node *waBinary.Node)
 			cli.Log.Warnf("Unknown version %d in decrypted message from %s", ag.Int("v"), info.SourceString())
 		}
 	}
-
 	if handled {
 		go cli.sendMessageReceipt(info)
 	}
@@ -329,7 +361,6 @@ func (cli *Client) decryptDM(child *waBinary.Node, from types.JID, isPreKey bool
 		}
 		plaintext, err = cipher.Decrypt(msg)
 		if err != nil {
-			cli.Log.Warnf("Error decrypting message check message ->", plaintext)
 			return nil, fmt.Errorf("failed to decrypt normal message: %w", err)
 		}
 	}
